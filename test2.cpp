@@ -19,10 +19,11 @@
 #include <fstream>
 #include <algorithm>
 #include <cctype>
+#include <pthread.h>
 
 using namespace std;
 //liczba rund, czas na runde, czas na runde gdy 1 wysle hasla,litery do losowania, maksymalna liczba klientow
-const size_t rounds = 5;
+const size_t rounds = 2;
 int time_for_round = 120;
 int time_after_first = 30;
 char letters[23] = {'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','r','s','t','u','w','z'};
@@ -38,15 +39,16 @@ std::unordered_set<int> clientFds;
 //struktura klienta, jego fd, imie, punkty, ostatnio zgadniete hasla
 struct Client{
     int fd;
-    string name;
+    string name = "";
     int points = 0;
     string given[4];
 };
 //tablica klientow, liczba klientow w tym momencie, zmienna inicjalizujaca stop gry, gdy jest za malo klientow, klienci w danej rundzie, odpowiedzi klientow w danej rundzie
 Client clients[1000];
 int numClients = 0;
+int numClientsLogged = 0;
 int stopper = 0;
-int roundClients = 0;
+int roundClients = 2;
 int roundAnswers = 0;
 
 //lista zwierzat,miast,imion,krajow
@@ -159,7 +161,9 @@ void removeClient(int fd)
     {
         if (clients[i].fd == fd)
         {
-            for(int j = i; j < numClients - 1; j++)
+            clients[i].name = "";
+            clients[i].points = 0;
+            for(int j = i; j < numClients; j++)
             {
                 clients[j] = clients[j + 1];
             }
@@ -168,10 +172,9 @@ void removeClient(int fd)
     numClients--;
 }
 //dodaje klienta
-void addClient(int fd,string name)
+void addClient(int fd)
 {
     clients[numClients].fd = fd;
-    clients[numClients].name = name;
     clients[numClients].points = 0;
     numClients++;
 }
@@ -198,14 +201,14 @@ int countdown(int t)
 {
     for (int i = t; i > 0; i--) {
         
-        if(numClients < 2) return i;
+        if(numClientsLogged < 2) return -1;
         if(roundAnswers == roundClients) return 0;
         if(stopper == 1) 
             {
+                stopper = 0;
                 if(i > time_after_first)
                 {
-                    stopper = 0;
-                    return 0;
+                    return time_after_first;
                 }
 
             }
@@ -218,10 +221,20 @@ int countdown(int t)
 string filler(int x,string type)
 {
     string fill = to_string(x);
-    for(int i = fill.size(); i < 4 ;i++)
-        fill.insert(0,"0");
+   // for(int i = fill.size(); i < 4 ;i++)
+       // fill.insert(0,"0");
     fill.insert(0,type);
     return fill;
+}
+
+int find_numer_of_client(int fd)
+{
+    for(int b = 0; b < numClients; b++)
+    {
+        if(clients[b].fd == fd)
+        return b;
+    }
+    return 0;
 }
 
 
@@ -231,11 +244,12 @@ void sendToAll(char * buffer, int count){
     std::unique_lock<std::mutex> lock(clientFdsLock);
     //cout<<endl<<"buffer----"<<buffer<<"----count "<<count<<endl;
     for(int i = 0;i < numClients; i++){
-        res = send(clients[i].fd, buffer, count, MSG_DONTWAIT);
+        if(clients[i].name != "")
+            res = send(clients[i].fd, buffer, count, MSG_DONTWAIT);
     }
 }
 //wysyla imiona i punkty wszystkich klientow
-void sendNames(int fd)
+void sendNames(int fd,string type)
 {
     char buffer[255];
     int res;
@@ -245,60 +259,127 @@ void sendNames(int fd)
     for(int i = 0; i < numClients; i++)
         message.append(clients[i].name + "-" + to_string(clients[i].points) + ",");
     sizer = message.size();
-    message.insert(0,filler(sizer,"1"));    
-    
+    //message.insert(0,filler(sizer,"1"));    
+    message.insert(0,type);  
+    message.append("#");  
     strcpy(buffer, message.c_str());
 
     //std::unique_lock<std::mutex> lock(clientFdsLock);
     res = send(fd, buffer, strlen(buffer), MSG_DONTWAIT);
 }
-//przypisuje do klienta jego propozycje hasel
-void guesses_to_player(int fd, char * guesses)
+//przypisuje do klienta jego propozycje hasel COS NIE TAK
+void guesses_to_player(int number, char * guesses,int n)
 {
     string text = "";
     int counter = 0;
     roundAnswers++;
-    for(int i = 0; i < numClients; i++)
+
+    for(int x = 0; x < n; x++)
     {
-        if(clients[i].fd == fd)
+        if(guesses[x] == ',')
         {
-            for(int x = 0; x < strlen(guesses); x++)
-            {
-                if(guesses[x] == ',')
-                {
-                    clients[i].given[counter] = text;
-                    text.clear();
-                    counter++;
-                }
-                else
-                    text = text + guesses[x];
-            }
-            cout<<" 1 "<<clients[i].given[0]<<" 2 "<<clients[i].given[1]<<" 3 "<<clients[i].given[2]<<" 4 "<<clients[i].given[3]<<" fd - "<<clients[i].fd<<endl;
-            break;
+            clients[number].given[counter] = text;
+            text.clear();
+            counter++;
         }
-
-
+        else
+            text = text + guesses[x];
     }
+    cout<<clients[number].name<<" fd - "<<clients[number].fd<<" 1 "<<clients[number].given[0]<<" 2 "<<clients[number].given[1]<<" 3 "<<clients[number].given[2]<<" 4 "<<clients[number].given[3]<<endl;
+    text.clear();
+
 
 
 }
 //daje punkty po rundzie
+//
 
-void givePoints()
-{/*
-    for(int i = 0; i < numClients)
+void add_point(string * data,int size,int fd,char letter,int i,int which)
+{
+    string word;
+    string oppword;
+    int apoint = 0;
+
+    word = clients[i].given[which];
+    std::transform(word.begin(), word.end(), word.begin(),[](unsigned char c){ return std::tolower(c); });
+    if(word[0] == letter)
     {
-        for(int a = 0 ; a < sizeCountries; a++)
+        for(int a = 0 ; a < size; a++)
         {
-
-
+            if(word == data[a])
+            {
+                for(int c = 0; c < numClients; c++)
+                {
+                    oppword = clients[c].given[which];
+                    std::transform(oppword.begin(), oppword.end(), oppword.begin(),[](unsigned char d){ return std::tolower(d); });
+                    if(oppword == word && clients[c].fd != clients[i].fd)
+                        apoint = 5;
+                }
+                if(apoint != 5)
+                    apoint = 10;
+                clients[i].points += apoint;
+                break;
+            }
         }
     }
-    
-*/
-printf("essa");
+
 }
 
+
+
+
+void givePoints(char letter)
+{
+
+    for(int i = 0; i < numClients; i++)
+    {
+
+        add_point(countries,sizeCountries,clients[i].fd,letter,i,0);
+        add_point(cities,sizeCities,clients[i].fd,letter,i,1);
+        add_point(polNames,sizePolNames,clients[i].fd,letter,i,2);
+        add_point(animals,sizeAnimals,clients[i].fd,letter,i,3);
+        cout<<endl<<clients[i].name<<" punkty - "<<clients[i].points<<" fd - "<<clients[i].fd;
+    }
+    
+}
+
+void winner()
+{
+    int max = 0;
+    int winner = 0;
+    for(int i = 0; i < numClients; i++)
+    {
+        if(clients[i].points > max)
+        {
+            max = clients[i].points; 
+            winner = i;
+        }
+    }
+    cout<<"Winner - "<<clients[winner].name<<" with "<<clients[winner].points<<" points"<<endl;
+}
+void deleting_points()
+{
+        for(int i = 0; i < numClients; i++)
+    {
+        clients[i].points = 0;
+    }
+}
+
+
+
+void send_letter_time(string letter, int t)
+{
+    char buffer[255];
+    string mess = "";
+    int sizer;
+    mess.append(letter + "," + to_string(t));
+    mess.insert(0,"2");
+    mess.append("#");
+    strcpy(buffer, mess.c_str());
+    sizer = mess.size();
+    sendToAll(buffer,sizer);
+}
+//jak sie jeden rozlaczy to gra sie nie startuje znowu
 //1 - imiona z punktacja 2 - literka z czasem 3 - pozostały czas
 //panstwo,miasta,roslina,zwierze,
 //prowadzi gre
@@ -313,46 +394,58 @@ void game(){
     int err;
     while(true)
     {
-        if(numClients > 1)
+        if(numClientsLogged > 1)
             {
-                countdown(5);
-                roundClients = numClients;
-
-                random_letters(round_letters);
-                cout << round_letters;
-                helper = round_letters[0];
-
-               // for(int i = 0; i < numClients; i++)
-                   // sendNames(clients[i].fd);
-
-                for(int i = 0; i < numClients; i++)
-                    sendNames(clients[i].fd);
-                countdown(3);
-                message.append(helper + "," + to_string(time_for_round));
-                sizer = message.size();
-                message.insert(0,filler(sizer,"2"));
-                strcpy(buffer, message.c_str());
-                sendToAll(buffer,sizer + 5);
-                
-                
-                err = countdown(time_for_round);
-                if(err == 0)
+                for(int i=0;i < rounds; i++)
                 {
-                    sendToAll(buffer,sizer + 5);
+                    countdown(5);
+                    if(numClientsLogged < 2 ) break;
+                    roundClients = numClientsLogged;
 
-                message.clear();
-                message.append(helper + "," + to_string(time_after_first));
-                sizer = message.size();
-                message.insert(0,filler(sizer,"2"));
-                strcpy(buffer, message.c_str());
-                sendToAll(buffer,sizer + 5);
-                countdown(time_after_first);
+                    random_letters(round_letters);
+                    cout << round_letters[i];
+                    helper = round_letters[i];
 
-                givePoints();
+                // for(int i = 0; i < numClients; i++)
+                    // sendNames(clients[i].fd);
 
-                roundAnswers = 0;
+                    for(int i = 0; i < numClients; i++)
+                        sendNames(clients[i].fd,"1");
 
-                }
+
+
+                    send_letter_time(helper,time_for_round);
+                    
+                    
+                    err = countdown(time_for_round);
+                    if(err > 0)
+                    {
+                        if(err == time_after_first)
+                        {
+                            send_letter_time(helper,time_after_first);
+                            countdown(time_after_first);
+                        }
+
+
+                        givePoints(round_letters[i]);
+
+                        roundAnswers = 0;
+                        roundClients = 2;
+
+                    }
+                    else 
+                    {
+                        break;
+                    }
+
+                    stopper = 0;
+                    }
+                    for(int i = 0; i < numClients; i++)
+                    sendNames(clients[i].fd,"3");
+
+                    //winner();
+                    deleting_points();
+                    countdown(30);
             }
     }
 }
@@ -432,7 +525,7 @@ int main(int argc, char ** argv)
 
                 {
                 std::unique_lock<std::mutex> lock(clientFdsLock);
-                addClient(clientFd,"Mariola");
+                addClient(clientFd);
                 }
 
 
@@ -443,15 +536,32 @@ int main(int argc, char ** argv)
                 epoll_ctl(myepoll, EPOLL_CTL_DEL,events[i].data.fd, NULL);
                 close(events[i].data.fd);
                 removeClient(events[i].data.fd);
+                numClientsLogged--;
             continue;
             }
             else if(events[i].events & EPOLLIN)
             {
                 char buf[512];
+                int number = find_numer_of_client(events[i].data.fd);
                 int n = read(events[i].data.fd, buf, 512);
-                stopper = 1;
-                cout<<"[+] data: ";
-                guesses_to_player(events[i].data.fd,buf);
+                if(clients[number].name == "")
+                {
+                    string name;
+                    for(int a = 0; a < n; a++)
+                    name += buf[a];
+                    
+                    clients[number].name = name;
+                    numClientsLogged++;
+                    cout<<"[+] data: "<<name;
+                }
+                else
+                {
+                    cout<<"[+] data: ";
+                    guesses_to_player(number,buf,n);
+                    stopper = 1;
+                }
+
+
             }
 
 
