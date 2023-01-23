@@ -23,7 +23,7 @@
 
 using namespace std;
 //liczba rund, czas na runde, czas na runde gdy 1 wysle hasla,litery do losowania, maksymalna liczba klientow
-const size_t rounds = 2;
+const size_t rounds = 3;
 int time_for_round = 120;
 int time_after_first = 30;
 char letters[23] = {'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','r','s','t','u','w','z'};
